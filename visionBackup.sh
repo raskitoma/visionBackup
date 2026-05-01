@@ -91,7 +91,12 @@ monitor_dump() {
         local size="..."
         [[ -f "$sql_file" ]] && size=$(du -h "$sql_file" 2>/dev/null | cut -f1) || true
         local last_line="working..."
-        [[ -f "$err_file" && -s "$err_file" ]] && last_line=$(tail -1 "$err_file" 2>/dev/null | sed 's/^-- //' | head -c 55) || true
+        if [[ -f "$err_file" && -s "$err_file" ]]; then
+            # Show only --verbose progress lines (prefixed with "-- ")
+            local verbose_line
+            verbose_line=$(grep '^-- ' "$err_file" 2>/dev/null | tail -1 | sed 's/^-- //' | head -c 55) || true
+            [[ -n "$verbose_line" ]] && last_line="$verbose_line"
+        fi
 
         cursor_up 2
         printf "\r$(clear_eol)  ${CYAN}%s${NC} Dumping database...   ${BOLD}%s${NC}          ${DIM}%s${NC}\n" \
@@ -109,10 +114,12 @@ monitor_dump() {
         printf "\r$(clear_eol)  ${GREEN}✔${NC} Database dumped        ${BOLD}%s${NC}          ${DIM}%s${NC}\n" "$final_size" "$(format_time $final_e)"
         printf "\r$(clear_eol)\n"
     else
+        # Filter out --verbose lines and warnings to get the actual error
         local err_msg
-        err_msg=$(tail -3 "$err_file" 2>/dev/null | tr '\n' ' ' | head -c 70) || true
+        err_msg=$(grep -v '^-- \|\[Warning\]' "$err_file" 2>/dev/null | tail -5 | tr '\n' ' ' | sed 's/^[[:space:]]*//' | head -c 70) || true
+        [[ -z "${err_msg// /}" ]] && err_msg="Exit code from mysqldump (check credentials/permissions)"
         printf "\r$(clear_eol)  ${RED}✖${NC} Dump FAILED                             ${DIM}%s${NC}\n" "$(format_time $final_e)"
-        printf "\r$(clear_eol)    └ ${RED}%s${NC}\n" "${err_msg:-Unknown error}"
+        printf "\r$(clear_eol)    └ ${RED}%s${NC}\n" "$err_msg"
     fi
     return $exit_code
 }
@@ -159,8 +166,9 @@ backup_source() {
 
     if [[ $conn_exit -ne 0 ]]; then
         local conn_err
-        conn_err=$(tail -1 "$err_file" 2>/dev/null | head -c 60) || true
-        log_event "FAIL" "$SRC_DESC" "Connection failed: ${conn_err:-Timeout}"
+        conn_err=$(grep -v '\[Warning\]' "$err_file" 2>/dev/null | tail -1 | head -c 60) || true
+        [[ -z "${conn_err// /}" ]] && conn_err="Timeout or unreachable"
+        log_event "FAIL" "$SRC_DESC" "Connection failed: ${conn_err}"
         if [[ "$MODE" != "auto" ]]; then
             printf "\r$(clear_eol)  ${RED}✖${NC} Connection FAILED\n"
             echo -e "    └ ${RED}${conn_err:-Timeout or unreachable}${NC}"
@@ -195,8 +203,10 @@ backup_source() {
     fi
 
     if [[ $dump_exit -ne 0 ]] || [[ ! -s "$sql_file" ]]; then
+        # Filter out --verbose progress and password warnings to get real errors
         local err_msg
-        err_msg=$(tail -3 "$err_file" 2>/dev/null | tr '\n' ' ' | head -c 80) || true
+        err_msg=$(grep -v '^-- \|\[Warning\]' "$err_file" 2>/dev/null | tail -5 | tr '\n' ' ' | sed 's/^[[:space:]]*//' | head -c 120) || true
+        [[ -z "${err_msg// /}" ]] && err_msg="Exit code ${dump_exit} (no error details — check credentials/permissions)"
         log_event "FAIL" "$SRC_DESC" "mysqldump failed (exit ${dump_exit}): ${err_msg}"
         if [[ "$MODE" != "auto" ]]; then
             echo -e "  ${DIM}│${NC}"
