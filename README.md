@@ -135,6 +135,40 @@ Each `.tar.gz` contains a single `.sql` file from `mysqldump`.
 
 ---
 
+## 🗄️ Backup Retention Policy
+
+Retention runs **automatically** after every backup (both interactive and cron). It prevents the target disk from filling up by applying a tiered policy per source:
+
+| Age | Retention | Max Files |
+|-----|-----------|-----------|
+| **0–30 days** | Keep every daily backup | ~30 |
+| **1–12 months** | Keep 1 backup per month (newest) | ~12 |
+| **1+ years** | Keep 1 backup per year (newest) | unlimited |
+
+**Example timeline** for a single source backed up daily:
+```
+Today ────────────────────────────────── 30 days ago
+  [all 30 daily backups kept]
+
+30 days ago ──────────────────────────── 12 months ago
+  [1 backup per month = 12 files max]
+
+12 months ago ────────────────────────── oldest
+  [1 backup per year]
+```
+
+Retention also cleans up associated `_error.log` debug files older than 30 days.
+
+---
+
+## 📋 Log Management
+
+- **Auto-rotation:** Log entries older than 30 days are automatically pruned on every script run.
+- **Clear logs:** Press `c` in the log viewer (deploy.sh → option 6) to clear all log entries. Requires typing `YES` to confirm.
+- **Log location:** `logs/visionBackup.log` in the script directory.
+
+---
+
 ## 🖥️ Interactive Backup Feedback
 
 When running in interactive mode, `visionBackup.sh` provides phased, real-time feedback for each source:

@@ -64,6 +64,107 @@ parse_source() {
     SRC_DB="${portdb#*/}"
 }
 
+# ── Log Rotation (keep last 30 days) ─────────────────────────────────────
+rotate_logs() {
+    [[ ! -f "$LOG_FILE" ]] && return 0
+    local cutoff
+    cutoff=$(date -d "30 days ago" '+%Y-%m-%d' 2>/dev/null) || return 0
+    local tmp
+    tmp=$(mktemp)
+    while IFS= read -r line; do
+        local d="${line:1:10}"
+        [[ "$d" >= "$cutoff" ]] && echo "$line"
+    done < "$LOG_FILE" > "$tmp"
+    mv "$tmp" "$LOG_FILE"
+}
+
+# ── Backup Retention Policy ───────────────────────────────────────────
+# 30 daily → 12 monthly (1 per month) → 1 per year
+cleanup_retention() {
+    [[ -z "${TARGET_PATH:-}" ]] && return 0
+    local base_dir="${TARGET_PATH}/visionBackup"
+    [[ ! -d "$base_dir" ]] && return 0
+
+    local today_epoch
+    today_epoch=$(date +%s)
+    local thirty_days=$((30 * 86400))
+    local one_year=$((365 * 86400))
+    local removed=0
+
+    for desc_dir in "$base_dir"/*/; do
+        [[ ! -d "$desc_dir" ]] && continue
+        local desc
+        desc=$(basename "$desc_dir")
+
+        # Collect backup files sorted newest first
+        local files=()
+        mapfile -t files < <(find "$desc_dir" -maxdepth 1 -name '*.tar.gz' 2>/dev/null | sort -r)
+        [[ ${#files[@]} -eq 0 ]] && continue
+
+        local keep=()
+        declare -A monthly_kept yearly_kept
+
+        for file in "${files[@]}"; do
+            local bn
+            bn=$(basename "$file")
+            local ds
+            ds=$(echo "$bn" | grep -oE '[0-9]{8}' | head -1) || true
+            [[ -z "$ds" ]] && keep+=("$file") && continue
+
+            local file_epoch
+            file_epoch=$(date -d "${ds:0:4}-${ds:4:2}-${ds:6:2}" +%s 2>/dev/null) || continue
+            local age=$((today_epoch - file_epoch))
+            local ym="${ds:0:6}"
+            local y="${ds:0:4}"
+
+            if (( age <= thirty_days )); then
+                keep+=("$file")
+            elif (( age <= one_year )); then
+                if [[ -z "${monthly_kept[$ym]+x}" ]]; then
+                    keep+=("$file")
+                    monthly_kept[$ym]=1
+                fi
+            else
+                if [[ -z "${yearly_kept[$y]+x}" ]]; then
+                    keep+=("$file")
+                    yearly_kept[$y]=1
+                fi
+            fi
+        done
+
+        # Remove files not in keep list
+        for file in "${files[@]}"; do
+            local found=false
+            for k in "${keep[@]}"; do
+                [[ "$file" == "$k" ]] && found=true && break
+            done
+            if ! $found; then
+                rm -f "$file"
+                rm -f "${file%.tar.gz}_error.log"
+                removed=$((removed + 1))
+                log_event "CLEANUP" "$desc" "Removed old backup: $(basename "$file")"
+            fi
+        done
+
+        # Clean up orphaned error logs older than 30 days
+        for errlog in "$desc_dir"*_error.log; do
+            [[ ! -f "$errlog" ]] && continue
+            local eds
+            eds=$(basename "$errlog" | grep -oE '[0-9]{8}' | head -1) || true
+            [[ -z "$eds" ]] && continue
+            local ee
+            ee=$(date -d "${eds:0:4}-${eds:4:2}-${eds:6:2}" +%s 2>/dev/null) || continue
+            (( today_epoch - ee > thirty_days )) && rm -f "$errlog"
+        done
+
+        unset monthly_kept yearly_kept
+    done
+
+    (( removed > 0 )) && log_event "INFO" "system" "Retention cleanup: removed ${removed} old backup(s)"
+    [[ "$MODE" != "auto" ]] && (( removed > 0 )) && print_info "Retention cleanup: removed ${removed} old backup(s)" || true
+    return 0
+}
+
 # ── Single-line Spinner ─────────────────────────────────────────────────────
 spin_wait() {
     local pid=$1 msg="$2"
@@ -331,6 +432,9 @@ run_interactive() {
     echo -e "  ${GREEN}✔ ${success} succeeded${NC}   ${RED}✖ ${fail} failed${NC}"
     separator
     echo ""
+
+    # Run retention cleanup after backups
+    cleanup_retention
 }
 
 # ── Auto Mode ────────────────────────────────────────────────────────────────
@@ -346,6 +450,9 @@ run_auto() {
         if backup_source "$b" ""; then success=$((success + 1)); else fail=$((fail + 1)); fi
     done
     log_event "INFO" "system" "Auto backup finished: ${success} succeeded, ${fail} failed"
+
+    # Run retention cleanup after backups
+    cleanup_retention
 }
 
 # ── Dependency Check ─────────────────────────────────────────────────────────
@@ -374,5 +481,8 @@ if [[ ! -f "$ENV_FILE" ]]; then echo "Error: .env not found. Run deploy.sh first
 source "$ENV_FILE"
 SOURCE_DBS="${SOURCE_DBS:-}"
 TARGET_PATH="${TARGET_PATH:-}"
+
+# Prune old log entries on every run
+rotate_logs
 
 if [[ "$MODE" == "auto" ]]; then run_auto; else run_interactive; fi

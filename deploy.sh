@@ -475,7 +475,7 @@ view_log() {
         fi
 
         separator
-        echo -e "  ${DIM}↑↓ Scroll  PgUp/PgDn Page  Home/End Jump  e Errors  s Success  a All  q Back${NC}"
+        echo -e "  ${DIM}↑↓ Scroll  PgUp/PgDn Page  Home/End Jump  e Errors  s Success  a All  c Clear  q Back${NC}"
 
         read -rsn1 key
         if [[ "$key" == $'\x1b' ]]; then
@@ -494,6 +494,14 @@ view_log() {
             filter="success"; offset=0
         elif [[ "$key" == 'a' || "$key" == 'A' ]]; then
             filter="all"; offset=0
+        elif [[ "$key" == 'c' || "$key" == 'C' ]]; then
+            echo ""
+            read -rp "  Clear all logs? Type 'YES': " confirm_clear
+            if [[ "$confirm_clear" == "YES" ]]; then
+                > "$LOG_FILE"
+                log_event "INFO" "system" "Logs cleared by user"
+                offset=0
+            fi
         elif [[ "$key" == 'q' || "$key" == 'Q' || "$key" == '' ]]; then
             return
         fi
