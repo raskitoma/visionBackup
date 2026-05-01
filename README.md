@@ -12,19 +12,23 @@ A robust, automated MySQL/MariaDB backup system for Debian-based Linux servers. 
 
 ### Dependencies
 
-| Package | Purpose | Install |
-|---------|---------|---------|
-| `mysql-client` / `mariadb-client` | `mysqldump` for database exports | `sudo apt install mariadb-client` |
-| `tar` | Compression of `.sql` dumps | Pre-installed on most systems |
-| `cron` | Scheduling automated backups | `sudo apt install cron` |
-| `grep`, `sed`, `awk` | Text processing | Pre-installed on most systems |
+| Package | Provides | Purpose | Install |
+|---------|----------|---------|---------|
+| `mariadb-client` | `mysql`, `mysqldump` | Database connection & export | `sudo apt install mariadb-client` |
+| `ncurses-bin` | `tput` | Terminal control (progress display, arrow-key nav) | `sudo apt install ncurses-bin` |
+| `coreutils` | `timeout` | Timeout protection for dump operations | Pre-installed on most systems |
+| `cron` | `crontab` | Scheduling automated backups | `sudo apt install cron` |
+| `tar` | `tar` | Compression of `.sql` dumps | Pre-installed on most systems |
+| — | `grep`, `sed`, `awk` | Text processing | Pre-installed on most systems |
 
 #### Install all dependencies at once:
 ```bash
-sudo apt update && sudo apt install -y mariadb-client cron
+sudo apt update && sudo apt install -y mariadb-client ncurses-bin cron
 ```
 
-> **Note:** The `pv` package is **not required** but could be installed for enhanced piped progress visualization in future versions:
+> **Note:** `deploy.sh` will **automatically check** for missing dependencies on startup and suggest the exact install command if anything is missing.
+
+> **Optional:** The `pv` package can be installed for enhanced piped progress visualization in future versions:
 > ```bash
 > sudo apt install -y pv
 > ```
@@ -51,9 +55,9 @@ chmod +x deploy.sh visionBackup.sh
 ./deploy.sh
 ```
 
-This opens the interactive management console where you can:
+On first run, the script checks for missing dependencies and suggests installation commands. Then it opens the interactive management console where you can:
 - Add/remove database sources
-- Set the backup target directory
+- Set the backup target directory (with arrow-key navigation)
 - Schedule daily cron jobs
 - View error logs
 
@@ -71,10 +75,11 @@ This opens the interactive management console where you can:
 /opt/visionBackup/            ← Script home directory
 ├── deploy.sh                 ← Management & setup script
 ├── visionBackup.sh           ← Backup execution engine
-├── .env                      ← Configuration (auto-generated)
+├── .env                      ← Configuration (auto-generated, git-ignored)
 ├── .env.sample               ← Configuration reference
+├── .gitignore                ← Prevents .env and logs from being committed
 ├── logs/
-│   └── visionBackup.log      ← Centralized event log
+│   └── visionBackup.log      ← Centralized event log (git-ignored)
 └── README.md
 
 /your/target/path/            ← User-defined TARGET_PATH
@@ -127,6 +132,39 @@ SOURCE_DBS="root:s3cret@localhost:3306/app_prod|production,admin:pw@10.0.0.5:330
 | **Auto (cron)** | `<description>_YYYYMMDD.tar.gz` |
 
 Each `.tar.gz` contains a single `.sql` file from `mysqldump`.
+
+---
+
+## 🖥️ Interactive Backup Feedback
+
+When running in interactive mode, `visionBackup.sh` provides phased, real-time feedback for each source:
+
+```
+  ┌─[1/3]─ production ── root@localhost:3306/app_prod
+  │
+  ✔ Connected to localhost:3306/app_prod
+  ✔ Database dumped        45.2 MB          1m23s
+  ✔ Compressed             12.1 MB
+  │
+  ✔  production_20260501_manual.tar.gz
+  └──────────────────────────────────────────────────────
+```
+
+**Phases shown:**
+1. **Connection test** — Verifies connectivity before attempting the dump
+2. **Database dump** — Live spinner with file size growth and current table being dumped (via `--verbose`)
+3. **Compression** — Spinner while `tar.gz` is created
+
+**On failure**, the error is displayed inline and the script **continues to the next source**:
+```
+  ┌─[2/3]─ staging ── admin@10.0.0.5:3306/staging_db
+  │
+  ✖ Connection FAILED
+    └ ERROR 2003: Can't connect to MySQL server on '10.0.0.5'
+  │
+  ⚠  Skipping — continuing to next source
+  └──────────────────────────────────────────────────────
+```
 
 ---
 
@@ -194,11 +232,22 @@ Select option `6` from the main menu to see the most recent `[FAIL]` entry.
 | **1** | Interactively add a new database source |
 | **2** | Select and remove a configured source |
 | **3** | List all sources with last successful backup timestamp |
-| **4** | Browse directories or type a path to set `TARGET_PATH` |
+| **4** | **Arrow-key directory browser** — navigate with ↑↓→← keys, Enter to select, `p` to type manually |
 | **5** | Set the daily backup hour or remove the cron schedule |
 | **6** | Display the latest `[FAIL]` log entry |
 | **7** | Launch `visionBackup.sh` in interactive mode |
 | **8** | Wipe all config, logs, and cron entries (keeps backup files) |
+
+### Directory Navigator Controls
+
+| Key | Action |
+|-----|--------|
+| `↑` / `↓` | Move selection up/down |
+| `→` | Enter selected directory |
+| `←` | Go to parent directory |
+| `Enter` | **Select current directory** as target |
+| `p` | Type a path manually |
+| `q` | Cancel and return to menu |
 
 ---
 
@@ -220,6 +269,7 @@ Requires typing `RESET` to confirm.
   ```bash
   chmod 600 .env
   ```
+- The `.gitignore` file prevents `.env` and `logs/` from being committed to version control.
 - Consider running the scripts under a dedicated service user.
 - Backup files should be stored on a volume with appropriate access controls.
 
@@ -230,10 +280,12 @@ Requires typing `RESET` to confirm.
 | Problem | Solution |
 |---------|----------|
 | `mysqldump: command not found` | Install: `sudo apt install mariadb-client` |
+| `tput: command not found` | Install: `sudo apt install ncurses-bin` |
 | `Access denied for user` | Verify credentials in `.env` or via `deploy.sh` |
 | Cron job not running | Check `sudo systemctl status cron` and verify with `crontab -l` |
 | Empty backup file | Check disk space and MySQL server availability |
 | Permission denied on target | Ensure the running user has write access to `TARGET_PATH` |
+| Script crashes on single failure | Ensure you're running v2+ (uses `set -uo pipefail` without `-e`) |
 
 ---
 

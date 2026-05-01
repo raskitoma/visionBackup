@@ -2,7 +2,7 @@
 # =============================================================================
 # deploy.sh — Management & Setup for visionBackup
 # =============================================================================
-set -euo pipefail
+set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ENV_FILE="${SCRIPT_DIR}/.env"
@@ -10,6 +10,10 @@ LOG_DIR="${SCRIPT_DIR}/logs"
 LOG_FILE="${LOG_DIR}/visionBackup.log"
 BACKUP_SCRIPT="${SCRIPT_DIR}/visionBackup.sh"
 CRON_TAG="visionBackup-auto"
+
+# ── Terminal Capabilities ────────────────────────────────────────────────────
+HAS_TPUT=false
+command -v tput &>/dev/null && HAS_TPUT=true
 
 # ── Colors ───────────────────────────────────────────────────────────────────
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'
@@ -43,6 +47,51 @@ press_enter() {
     read -rp "  Press Enter to continue..." _
 }
 
+# ── Dependency Check ─────────────────────────────────────────────────────────
+check_requirements() {
+    local missing=() pkgs=()
+
+    for cmd in mysql mysqldump; do
+        if ! command -v "$cmd" &>/dev/null; then
+            missing+=("$cmd"); pkgs+=("mariadb-client")
+        fi
+    done
+    for cmd in tar grep sed awk; do
+        command -v "$cmd" &>/dev/null || missing+=("$cmd")
+    done
+    if ! command -v tput &>/dev/null; then
+        missing+=("tput"); pkgs+=("ncurses-bin")
+    fi
+    if ! command -v timeout &>/dev/null; then
+        missing+=("timeout"); pkgs+=("coreutils")
+    fi
+    if ! command -v crontab &>/dev/null; then
+        missing+=("crontab"); pkgs+=("cron")
+    fi
+
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        echo ""
+        echo -e "  ${RED}${BOLD}Missing Dependencies${NC}"
+        separator
+        for cmd in "${missing[@]}"; do
+            echo -e "  ${RED}✖${NC} ${cmd}"
+        done
+        # Deduplicate package suggestions
+        local unique_pkgs
+        unique_pkgs=$(printf '%s\n' "${pkgs[@]}" | sort -u | tr '\n' ' ')
+        if [[ -n "${unique_pkgs// /}" ]]; then
+            echo ""
+            echo -e "  ${YELLOW}Suggested install command:${NC}"
+            echo -e "  ${BOLD}sudo apt install -y ${unique_pkgs}${NC}"
+        fi
+        echo ""
+        read -rp "  Continue anyway? (y/N): " cont
+        if [[ "$cont" != "y" && "$cont" != "Y" ]]; then
+            exit 1
+        fi
+    fi
+}
+
 # ── ENV Management ───────────────────────────────────────────────────────────
 init_env() {
     mkdir -p "$LOG_DIR"
@@ -72,12 +121,10 @@ EOF
 }
 
 # ── Source Parsing ───────────────────────────────────────────────────────────
-# Parse a single block: user:pass@host:port/db|desc
 parse_source() {
     local block="$1"
     SRC_DESC="${block##*|}"
     local connstr="${block%|*}"
-    # Split on last '@' to handle passwords containing special chars
     SRC_USER="${connstr%%:*}"
     local rest="${connstr#*:}"
     local hostportdb="${rest##*@}"
@@ -152,7 +199,7 @@ remove_source() {
     for b in "${blocks[@]}"; do
         parse_source "$b"
         echo -e "  ${CYAN}${i})${NC} ${SRC_DESC} ${DIM}(${SRC_USER}@${SRC_HOST}:${SRC_PORT}/${SRC_DB})${NC}"
-        ((i++))
+        i=$((i+1))
     done
     separator
     echo -e "  ${DIM}0) Cancel${NC}"
@@ -206,7 +253,7 @@ list_sources() {
         echo -e "  ${CYAN}${i})${NC} ${BOLD}${SRC_DESC}${NC}"
         echo -e "     Host: ${SRC_HOST}:${SRC_PORT}  DB: ${SRC_DB}  User: ${SRC_USER}"
         echo -e "     Last backup: ${GREEN}${last_backup}${NC}"
-        ((i++))
+        i=$((i+1))
     done
 
     separator
@@ -219,64 +266,107 @@ list_sources() {
     press_enter
 }
 
-# ── Target Path Selector ────────────────────────────────────────────────────
+# ── Target Path Selector (Arrow-Key Navigation) ─────────────────────────────
 select_target() {
     local current_dir="${TARGET_PATH:-$HOME}"
     [[ ! -d "$current_dir" ]] && current_dir="$HOME"
 
     while true; do
-        print_header
-        echo -e "  ${BOLD}Select Target Directory${NC}"
-        echo -e "  Current: ${MAGENTA}${current_dir}${NC}"
-        separator
-
-        # List subdirectories
+        # Read subdirectories into array
         local dirs=()
-        local i=1
         while IFS= read -r d; do
-            dirs+=("$d")
-            echo -e "  ${CYAN}${i})${NC} 📁 $(basename "$d")/"
-            ((i++))
+            dirs+=("$(basename "$d")")
         done < <(find "$current_dir" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort)
 
-        separator
-        echo -e "  ${GREEN}s)${NC} Select current directory"
-        echo -e "  ${YELLOW}u)${NC} Go up one level"
-        echo -e "  ${YELLOW}p)${NC} Type a path manually"
-        echo -e "  ${DIM}0)${NC} Cancel"
-        echo ""
-        read -rp "  Choice: " nav
+        local selected=0
+        local total=${#dirs[@]}
+        local max_visible=15
+        local action=""
 
-        case "$nav" in
-            s)
+        while [[ -z "$action" ]]; do
+            print_header
+            echo -e "  ${BOLD}Select Target Directory${NC}"
+            echo -e "  ${MAGENTA}${current_dir}${NC}"
+            separator
+            echo -e "  ${DIM}↑↓ Navigate   → Enter dir   ← Parent   Enter Select   p Manual   q Cancel${NC}"
+            separator
+
+            if [[ $total -eq 0 ]]; then
+                echo -e "  ${DIM}(empty directory)${NC}"
+            else
+                # Calculate visible window
+                local offset=0
+                if (( selected >= max_visible )); then
+                    offset=$((selected - max_visible + 1))
+                fi
+                local end=$((offset + max_visible))
+                (( end > total )) && end=$total
+
+                if (( offset > 0 )); then
+                    echo -e "  ${DIM}  ↑ ${offset} more above${NC}"
+                fi
+
+                local idx
+                for (( idx=offset; idx<end; idx++ )); do
+                    if [[ $idx -eq $selected ]]; then
+                        echo -e "  ${CYAN}▸${NC} ${BOLD}📁 ${dirs[$idx]}/${NC}"
+                    else
+                        echo -e "    ${DIM}📁 ${dirs[$idx]}/${NC}"
+                    fi
+                done
+
+                if (( end < total )); then
+                    echo -e "  ${DIM}  ↓ $((total - end)) more below${NC}"
+                fi
+            fi
+
+            separator
+
+            # Read keypress
+            read -rsn1 key
+            if [[ "$key" == $'\x1b' ]]; then
+                read -rsn2 -t 0.1 key
+                case "$key" in
+                    '[A') # Up arrow
+                        (( selected > 0 )) && selected=$((selected - 1))
+                        ;;
+                    '[B') # Down arrow
+                        (( total > 0 && selected < total - 1 )) && selected=$((selected + 1))
+                        ;;
+                    '[C') # Right arrow — enter selected directory
+                        if (( total > 0 )); then
+                            current_dir="${current_dir%/}/${dirs[$selected]}"
+                            action="refresh"
+                        fi
+                        ;;
+                    '[D') # Left arrow — go up
+                        current_dir="$(dirname "$current_dir")"
+                        action="refresh"
+                        ;;
+                esac
+            elif [[ "$key" == '' ]]; then
+                # Enter — select current directory as target
                 TARGET_PATH="$current_dir"
                 save_env
                 log_event "INFO" "system" "Target path set: ${TARGET_PATH}"
                 print_msg "Target set to: ${TARGET_PATH}"
-                press_enter; return
-                ;;
-            u)
-                current_dir="$(dirname "$current_dir")"
-                ;;
-            p)
+                press_enter
+                return
+            elif [[ "$key" == 'q' || "$key" == 'Q' ]]; then
+                return
+            elif [[ "$key" == 'p' || "$key" == 'P' ]]; then
+                echo ""
                 read -rp "  Enter full path: " manual_path
                 if [[ -d "$manual_path" ]]; then
                     current_dir="$manual_path"
+                    action="refresh"
                 else
                     print_err "Directory does not exist."
-                    press_enter
-                fi
-                ;;
-            0) return ;;
-            *)
-                if [[ "$nav" =~ ^[0-9]+$ ]] && (( nav >= 1 && nav <= ${#dirs[@]} )); then
-                    current_dir="${dirs[$((nav-1))]}"
-                else
-                    print_err "Invalid choice."
                     sleep 1
+                    action="refresh"
                 fi
-                ;;
-        esac
+            fi
+        done
     done
 }
 
@@ -298,7 +388,6 @@ setup_cron() {
     read -rp "  Run daily at hour (00-23, or 'r' to remove): " hour
 
     if [[ "$hour" == "r" ]]; then
-        # Remove only our tagged entries, preserve everything else
         crontab -l 2>/dev/null | grep -v "$CRON_TAG" | crontab - 2>/dev/null || true
         log_event "INFO" "system" "Cron job removed"
         print_msg "Cron job removed."
@@ -310,8 +399,7 @@ setup_cron() {
         press_enter; return
     fi
 
-    local cron_line
-    cron_line="0 ${hour} * * * /usr/bin/env bash ${BACKUP_SCRIPT} --auto # ${CRON_TAG}"
+    local cron_line="0 ${hour} * * * /usr/bin/env bash ${BACKUP_SCRIPT} --auto # ${CRON_TAG}"
 
     # Preserve existing cron entries, replace only our tagged line
     local temp_cron
@@ -371,14 +459,10 @@ factory_reset() {
         press_enter; return
     fi
 
-    # Remove cron entry
     crontab -l 2>/dev/null | grep -v "$CRON_TAG" | crontab - 2>/dev/null || true
-
-    # Remove config and logs
     rm -f "$ENV_FILE"
     rm -rf "$LOG_DIR"
 
-    # Reinitialize clean state
     SOURCE_DBS=""
     TARGET_PATH=""
     init_env
@@ -389,6 +473,7 @@ factory_reset() {
 
 # ── Main Menu ────────────────────────────────────────────────────────────────
 main_menu() {
+    check_requirements
     init_env
     load_env
 
@@ -440,7 +525,6 @@ main_menu() {
             *) print_err "Invalid option."; sleep 0.5 ;;
         esac
 
-        # Reload env after each action (in case it was modified)
         load_env
     done
 }
