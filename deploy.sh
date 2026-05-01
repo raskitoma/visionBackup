@@ -508,6 +508,129 @@ view_log() {
     done
 }
 
+# ── Error Log Browser ────────────────────────────────────────────────────────
+view_error_logs() {
+    if [[ -z "$TARGET_PATH" ]]; then
+        print_header; print_warn "TARGET_PATH not set."; press_enter; return
+    fi
+
+    local base_dir="${TARGET_PATH}/visionBackup"
+    if [[ ! -d "$base_dir" ]]; then
+        print_header; print_warn "No backup directory found."; press_enter; return
+    fi
+
+    while true; do
+        # Collect all error logs
+        local files=()
+        mapfile -t files < <(find "$base_dir" -name '*_error.log' -type f 2>/dev/null | sort -r)
+        local total=${#files[@]}
+
+        if [[ $total -eq 0 ]]; then
+            print_header
+            print_msg "No error logs found."
+            press_enter; return
+        fi
+
+        local selected=0 max_visible=12 action=""
+
+        while [[ -z "$action" ]]; do
+            print_header
+            echo -e "  ${BOLD}Error Logs${NC}  ${DIM}│${NC} ${RED}${total} file(s)${NC}"
+            separator
+            echo -e "  ${DIM}↑↓ Navigate   Enter View   d Delete   D Delete all   q Back${NC}"
+            separator
+
+            # Visible window
+            local offset=0
+            (( selected >= max_visible )) && offset=$((selected - max_visible + 1))
+            local end=$((offset + max_visible))
+            (( end > total )) && end=$total
+
+            (( offset > 0 )) && echo -e "  ${DIM}  ↑ ${offset} more${NC}"
+
+            local idx
+            for (( idx=offset; idx<end; idx++ )); do
+                local bn
+                bn=$(basename "${files[$idx]}")
+                local sz
+                sz=$(du -h "${files[$idx]}" 2>/dev/null | cut -f1)
+                local parent
+                parent=$(basename "$(dirname "${files[$idx]}")")
+                if [[ $idx -eq $selected ]]; then
+                    echo -e "  ${CYAN}▸${NC} ${BOLD}${parent}/${bn}${NC}  ${DIM}(${sz})${NC}"
+                else
+                    echo -e "    ${DIM}${parent}/${bn}  (${sz})${NC}"
+                fi
+            done
+
+            (( end < total )) && echo -e "  ${DIM}  ↓ $((total - end)) more${NC}"
+            separator
+
+            read -rsn1 key
+            if [[ "$key" == $'\x1b' ]]; then
+                read -rsn2 -t 0.1 key
+                case "$key" in
+                    '[A') (( selected > 0 )) && selected=$((selected - 1)) ;;
+                    '[B') (( selected < total - 1 )) && selected=$((selected + 1)) ;;
+                esac
+            elif [[ "$key" == '' ]]; then
+                # View selected error log
+                local view_offset=0 view_page=18
+                local view_lines=()
+                mapfile -t view_lines < "${files[$selected]}"
+                local view_total=${#view_lines[@]}
+                local viewing=true
+
+                while $viewing; do
+                    print_header
+                    echo -e "  ${BOLD}$(basename "${files[$selected]}")${NC}"
+                    echo -e "  ${DIM}$(dirname "${files[$selected]}")${NC}"
+                    separator
+
+                    (( view_offset < 0 )) && view_offset=0
+                    (( view_total > 0 && view_offset > view_total - 1 )) && view_offset=$((view_total - 1))
+                    local vend=$((view_offset + view_page))
+                    (( vend > view_total )) && vend=$view_total
+
+                    for (( vi=view_offset; vi<vend; vi++ )); do
+                        echo -e "  ${view_lines[$vi]}"
+                    done
+
+                    separator
+                    echo -e "  ${DIM}↑↓ Scroll  PgUp/PgDn Page  q Back${NC}"
+
+                    read -rsn1 vkey
+                    if [[ "$vkey" == $'\x1b' ]]; then
+                        read -rsn2 -t 0.1 vkey
+                        case "$vkey" in
+                            '[A') view_offset=$((view_offset - 1)) ;;
+                            '[B') view_offset=$((view_offset + 1)) ;;
+                            '[5') read -rsn1 -t 0.1 _; view_offset=$((view_offset - view_page)) ;;
+                            '[6') read -rsn1 -t 0.1 _; view_offset=$((view_offset + view_page)) ;;
+                        esac
+                    elif [[ "$vkey" == 'q' || "$vkey" == 'Q' || "$vkey" == '' ]]; then
+                        viewing=false
+                    fi
+                done
+            elif [[ "$key" == 'd' ]]; then
+                rm -f "${files[$selected]}"
+                log_event "INFO" "system" "Deleted error log: $(basename "${files[$selected]}")"
+                action="refresh"
+            elif [[ "$key" == 'D' ]]; then
+                echo ""
+                read -rp "  Delete ALL ${total} error logs? Type 'YES': " confirm_del
+                if [[ "$confirm_del" == "YES" ]]; then
+                    for f in "${files[@]}"; do rm -f "$f"; done
+                    log_event "INFO" "system" "Purged all error logs (${total} files)"
+                fi
+                action="refresh"
+            elif [[ "$key" == 'q' || "$key" == 'Q' ]]; then
+                return
+            fi
+        done
+    done
+}
+
 # ── Factory Reset ────────────────────────────────────────────────────────────
 factory_reset() {
     print_header
@@ -564,9 +687,10 @@ main_menu() {
         separator
         echo -e "  ${BOLD}Diagnostics${NC}"
         echo -e "    ${CYAN}6)${NC} View event log"
-        echo -e "    ${CYAN}7)${NC} Run backup now"
+        echo -e "    ${CYAN}7)${NC} View error logs"
+        echo -e "    ${CYAN}8)${NC} Run backup now"
         separator
-        echo -e "    ${RED}8)${NC} Factory reset"
+        echo -e "    ${RED}9)${NC} Factory reset"
         echo -e "    ${DIM}0)${NC} Exit"
         echo ""
         read -rp "  ▸ " choice
@@ -578,7 +702,8 @@ main_menu() {
             4) select_target ;;
             5) setup_cron ;;
             6) view_log ;;
-            7)
+            7) view_error_logs ;;
+            8)
                 if [[ ! -x "$BACKUP_SCRIPT" ]]; then
                     print_err "visionBackup.sh not found or not executable."
                     press_enter
@@ -587,7 +712,7 @@ main_menu() {
                     press_enter
                 fi
                 ;;
-            8) factory_reset ;;
+            9) factory_reset ;;
             0) echo -e "\n  ${DIM}Goodbye.${NC}\n"; exit 0 ;;
             *) print_err "Invalid option."; sleep 0.5 ;;
         esac
