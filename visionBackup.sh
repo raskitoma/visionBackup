@@ -73,7 +73,7 @@ rotate_logs() {
     tmp=$(mktemp)
     while IFS= read -r line; do
         local d="${line:1:10}"
-        [[ "$d" >= "$cutoff" ]] && echo "$line"
+        [[ "$d" > "$cutoff" || "$d" == "$cutoff" ]] && echo "$line"
     done < "$LOG_FILE" > "$tmp"
     mv "$tmp" "$LOG_FILE"
 }
