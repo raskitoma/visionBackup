@@ -416,29 +416,88 @@ setup_cron() {
     press_enter
 }
 
-# ── Error Report ─────────────────────────────────────────────────────────────
-show_last_error() {
-    print_header
-    echo -e "  ${BOLD}Latest Error Log Entry${NC}"
-    separator
-
+# ── Log Viewer (scrollable, filterable) ──────────────────────────────────────
+view_log() {
     if [[ ! -f "$LOG_FILE" ]]; then
-        print_warn "No log file found."
+        print_header
+        print_warn "No log file found yet."
         press_enter; return
     fi
 
-    local last_error
-    last_error=$(grep "\[FAIL\]" "$LOG_FILE" | tail -1 || true)
+    local filter="all" offset=0 page_size=14
 
-    if [[ -z "$last_error" ]]; then
-        print_msg "No errors recorded. All clear!"
-    else
-        echo -e "  ${RED}${last_error}${NC}"
-    fi
+    while true; do
+        # Load lines based on filter
+        local lines=()
+        if [[ "$filter" == "errors" ]]; then
+            mapfile -t lines < <(grep '\[FAIL\]' "$LOG_FILE" 2>/dev/null)
+        elif [[ "$filter" == "success" ]]; then
+            mapfile -t lines < <(grep '\[SUCCESS\]' "$LOG_FILE" 2>/dev/null)
+        else
+            mapfile -t lines < <(cat "$LOG_FILE" 2>/dev/null)
+        fi
 
-    separator
-    echo -e "  ${DIM}Full log: ${LOG_FILE}${NC}"
-    press_enter
+        local total=${#lines[@]}
+        local error_count
+        error_count=$(grep -c '\[FAIL\]' "$LOG_FILE" 2>/dev/null || echo 0)
+        local success_count
+        success_count=$(grep -c '\[SUCCESS\]' "$LOG_FILE" 2>/dev/null || echo 0)
+
+        # Clamp offset
+        (( offset < 0 )) && offset=0
+        (( total > 0 && offset > total - 1 )) && offset=$((total - 1))
+
+        local end=$((offset + page_size))
+        (( end > total )) && end=$total
+
+        print_header
+        echo -e "  ${BOLD}Event Log${NC}  ${DIM}│${NC} Total: ${CYAN}${total}${NC}  Errors: ${RED}${error_count}${NC}  Success: ${GREEN}${success_count}${NC}"
+        echo -e "  Filter: ${BOLD}${filter}${NC}   Showing: $((offset+1))-${end} of ${total}"
+        separator
+
+        if [[ $total -eq 0 ]]; then
+            if [[ "$filter" == "errors" ]]; then
+                print_msg "No errors recorded. All clear!"
+            else
+                print_warn "Log is empty."
+            fi
+        else
+            for (( i=offset; i<end; i++ )); do
+                local line="${lines[$i]}"
+                if [[ "$line" == *"[FAIL]"* ]]; then
+                    echo -e "  ${RED}${line}${NC}"
+                elif [[ "$line" == *"[SUCCESS]"* ]]; then
+                    echo -e "  ${GREEN}${line}${NC}"
+                else
+                    echo -e "  ${DIM}${line}${NC}"
+                fi
+            done
+        fi
+
+        separator
+        echo -e "  ${DIM}↑↓ Scroll  PgUp/PgDn Page  Home/End Jump  e Errors  s Success  a All  q Back${NC}"
+
+        read -rsn1 key
+        if [[ "$key" == $'\x1b' ]]; then
+            read -rsn2 -t 0.1 key
+            case "$key" in
+                '[A') offset=$((offset - 1)) ;;
+                '[B') offset=$((offset + 1)) ;;
+                '[5') read -rsn1 -t 0.1 _; offset=$((offset - page_size)) ;;
+                '[6') read -rsn1 -t 0.1 _; offset=$((offset + page_size)) ;;
+                '[H') offset=0 ;;
+                '[F') (( total > 0 )) && offset=$((total - page_size)); (( offset < 0 )) && offset=0 ;;
+            esac
+        elif [[ "$key" == 'e' || "$key" == 'E' ]]; then
+            filter="errors"; offset=0
+        elif [[ "$key" == 's' || "$key" == 'S' ]]; then
+            filter="success"; offset=0
+        elif [[ "$key" == 'a' || "$key" == 'A' ]]; then
+            filter="all"; offset=0
+        elif [[ "$key" == 'q' || "$key" == 'Q' || "$key" == '' ]]; then
+            return
+        fi
+    done
 }
 
 # ── Factory Reset ────────────────────────────────────────────────────────────
@@ -496,7 +555,7 @@ main_menu() {
         echo -e "    ${CYAN}5)${NC} Schedule cron job"
         separator
         echo -e "  ${BOLD}Diagnostics${NC}"
-        echo -e "    ${CYAN}6)${NC} Show last error"
+        echo -e "    ${CYAN}6)${NC} View event log"
         echo -e "    ${CYAN}7)${NC} Run backup now"
         separator
         echo -e "    ${RED}8)${NC} Factory reset"
@@ -510,7 +569,7 @@ main_menu() {
             3) list_sources ;;
             4) select_target ;;
             5) setup_cron ;;
-            6) show_last_error ;;
+            6) view_log ;;
             7)
                 if [[ ! -x "$BACKUP_SCRIPT" ]]; then
                     print_err "visionBackup.sh not found or not executable."

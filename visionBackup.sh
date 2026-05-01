@@ -114,9 +114,12 @@ monitor_dump() {
         printf "\r$(clear_eol)  ${GREEN}✔${NC} Database dumped        ${BOLD}%s${NC}          ${DIM}%s${NC}\n" "$final_size" "$(format_time $final_e)"
         printf "\r$(clear_eol)\n"
     else
-        # Filter out --verbose lines and warnings to get the actual error
+        # Try filtered first, fall back to unfiltered last lines
         local err_msg
         err_msg=$(grep -v '^-- \|\[Warning\]' "$err_file" 2>/dev/null | tail -5 | tr '\n' ' ' | sed 's/^[[:space:]]*//' | head -c 70) || true
+        if [[ -z "${err_msg// /}" ]]; then
+            err_msg=$(tail -3 "$err_file" 2>/dev/null | sed 's/^-- //' | tr '\n' ' ' | sed 's/^[[:space:]]*//' | head -c 70) || true
+        fi
         [[ -z "${err_msg// /}" ]] && err_msg="Exit code from mysqldump (check credentials/permissions)"
         printf "\r$(clear_eol)  ${RED}✖${NC} Dump FAILED                             ${DIM}%s${NC}\n" "$(format_time $final_e)"
         printf "\r$(clear_eol)    └ ${RED}%s${NC}\n" "$err_msg"
@@ -203,14 +206,20 @@ backup_source() {
     fi
 
     if [[ $dump_exit -ne 0 ]] || [[ ! -s "$sql_file" ]]; then
-        # Filter out --verbose progress and password warnings to get real errors
+        # Try filtered first, fall back to unfiltered with -- prefix stripped
         local err_msg
         err_msg=$(grep -v '^-- \|\[Warning\]' "$err_file" 2>/dev/null | tail -5 | tr '\n' ' ' | sed 's/^[[:space:]]*//' | head -c 120) || true
-        [[ -z "${err_msg// /}" ]] && err_msg="Exit code ${dump_exit} (no error details — check credentials/permissions)"
+        if [[ -z "${err_msg// /}" ]]; then
+            err_msg=$(tail -5 "$err_file" 2>/dev/null | sed 's/^-- //' | tr '\n' ' ' | sed 's/^[[:space:]]*//' | head -c 120) || true
+        fi
+        [[ -z "${err_msg// /}" ]] && err_msg="Exit code ${dump_exit} (check ${backup_dir}/${filename}_error.log)"
+        # Save full stderr for debugging
+        cp "$err_file" "${backup_dir}/${filename}_error.log" 2>/dev/null || true
         log_event "FAIL" "$SRC_DESC" "mysqldump failed (exit ${dump_exit}): ${err_msg}"
         if [[ "$MODE" != "auto" ]]; then
             echo -e "  ${DIM}│${NC}"
             echo -e "  ${YELLOW}⚠${NC}  Skipping — continuing to next source"
+            echo -e "  ${DIM}│${NC}  ${DIM}Full stderr saved: ${backup_dir}/${filename}_error.log${NC}"
             echo -e "  ${DIM}└──────────────────────────────────────────────────────${NC}"
         fi
         rm -f "$sql_file" "$err_file"; return 1
